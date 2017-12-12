@@ -27,6 +27,7 @@ int numDescSets_Compute = 1;
 
 #define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <iostream>
@@ -38,6 +39,7 @@ int numDescSets_Compute = 1;
 #include <vulkan/vk_sdk_platform.h>
 
 #include "SPIRV/GlslangToSpv.h"
+#include "ToolBox.h"
 
 #include <Windows.h>
 
@@ -93,7 +95,7 @@ typedef struct _db {
 } DeviceBuffer;
 
 typedef struct _id {
-	glm::vec3 position;
+	glm::vec4 position;
 	glm::vec4 prop;
 } InstanceData;
 
@@ -152,44 +154,9 @@ bool useWireframe = false;
 static Vertex surfaceData[(LENGTH + 1) * (LENGTH + 1)];
 static uint32_t indexData[(LENGTH * LENGTH) * 6];
 
-static const char *vertShader =
-"#version 400\n"
-"#extension GL_ARB_separate_shader_objects : enable\n"
-"#extension GL_ARB_shading_language_420pack : enable\n"
-"layout (std140, binding = 0) uniform bufferVals {\n"
-"    mat4 mvp;\n"
-"} myBufferVals;\n"
-"layout (location = 0) in vec4 pos;\n"
-"layout (location = 1) in vec4 inColor;\n"
-"layout (location = 0) out vec4 outColor;\n"
-"layout (location = 1) out vec3 position;\n"
-"out gl_PerVertex { \n"
-"    vec4 gl_Position;\n"
-"};\n"
-"void main() {\n"
-"   outColor = inColor;\n"
-"	position = (myBufferVals.mvp * pos).xyz;\n"
-"   gl_Position = myBufferVals.mvp * pos;\n"
-"}\n";
-
-static const char *fragShader =
-"#version 400\n"
-"#extension GL_ARB_separate_shader_objects : enable\n"
-"#extension GL_ARB_shading_language_420pack : enable\n"
-"layout (location = 0) in vec4 color;\n"
-"layout (location = 1) in vec3 position;\n"
-"layout (location = 0) out vec4 outColor;\n"
-"void main() {\n"
-"	vec3 lightPos = vec3(1, 1, 0);\n"
-"	vec3 camPos = vec3(0, 3, 10);\n"
-"	vec3 toCam = camPos - position;\n"
-"   //outColor = dot(lightPos, toCam) * color * 0.3 + color * 0.7;\n"
-"   outColor = color;\n"
-"}\n"; 
-
-static const char *computeShader = 
-"#version 400\n"
-"void main() {}\n";
+static char *vertShader;
+static char *fragShader;
+static char *computeShader;
 
 VkInstance m_instance;
 vector<VkPhysicalDevice> m_GPUs;
@@ -1526,6 +1493,8 @@ VertexBuffer CreateVertexBuffer(
 	res = vkAllocateMemory(device, &alloc_info, NULL,
 		&(vertex_buffer.mem));
 	assert(res == VK_SUCCESS);
+
+	vertex_buffer.buffer_info.buffer = vertex_buffer.buf;
 	vertex_buffer.buffer_info.range = mem_reqs.size;
 	vertex_buffer.buffer_info.offset = 0;
 
@@ -1563,11 +1532,11 @@ VertexBuffer CreateVertexBuffer(
 	vi_attribs[1].offset = 4 * sizeof(float);
 
 	vi_attribs[2].binding = 1;
-	vi_attribs[2].location = 0;
-	vi_attribs[2].format = VK_FORMAT_R32G32B32_SFLOAT;
+	vi_attribs[2].location = 2;
+	vi_attribs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
 	vi_attribs[2].offset = 0;
 	vi_attribs[3].binding = 1;
-	vi_attribs[3].location = 1;
+	vi_attribs[3].location = 3;
 	vi_attribs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
 	vi_attribs[3].offset = sizeof(glm::vec3);
 
@@ -1616,6 +1585,8 @@ IndexBuffer CreateIndexBuffer(
 	res = vkAllocateMemory(device, &alloc_info, NULL,
 		&(index_buffer.mem));
 	assert(res == VK_SUCCESS);
+
+	index_buffer.buffer_info.buffer = index_buffer.buf;
 	index_buffer.buffer_info.range = mem_reqs.size;
 	index_buffer.buffer_info.offset = 0;
 
@@ -1677,6 +1648,8 @@ DeviceBuffer CreateDeviceBuffer(
 	res = vkAllocateMemory(device, &alloc_info, NULL,
 		&(buffer.mem));
 	assert(res == VK_SUCCESS);
+
+	buffer.buffer_info.buffer = buffer.buf;
 	buffer.buffer_info.range = mem_reqs.size;
 	buffer.buffer_info.offset = 0;
 
@@ -1708,11 +1681,14 @@ VkDescriptorPool CreateDescriptorPool(VkDevice device)
 	type_count[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	type_count[0].descriptorCount = 1;
 
+	type_count[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	type_count[1].descriptorCount = 1;
+
 	VkDescriptorPoolCreateInfo descriptor_pool = {};
 	descriptor_pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	descriptor_pool.pNext = NULL;
-	descriptor_pool.maxSets = 1;
-	descriptor_pool.poolSizeCount = 1;
+	descriptor_pool.maxSets = numDescSets_Compute + numDescSets_Graphics;
+	descriptor_pool.poolSizeCount = 2;
 	descriptor_pool.pPoolSizes = type_count;
 
 	res = vkCreateDescriptorPool(device, &descriptor_pool, NULL,
@@ -2004,7 +1980,7 @@ void render()
 		m_pipelineLayout_Compute, 0, numDescSets_Compute,
 		m_descSet_Compute.data(), 0, NULL);
 
-	vkCmdBind
+	vkCmdDispatch(m_cmdBuffer, particlesCount / 512, 1, 1);
 
 	//Maybe some semaphore / fences here
 
@@ -2077,7 +2053,8 @@ void render()
 	initViewports(width, height, m_cmdBuffer, m_viewport);
 	initScissors(width, height, m_cmdBuffer, m_scissor);
 
-	vkCmdDraw(m_cmdBuffer, 12 * 3, 1, 0, 0);
+	vkCmdDraw(m_cmdBuffer, 12 * 3, particlesCount, 0, 0);
+	//vkCmdDraw(m_cmdBuffer, 12 * 3, 1, 0, 0);
 	//vkCmdDrawIndexed(m_cmdBuffer, (LENGTH * LENGTH) * 6, 1, 0, 0, 0);
 
 	vkCmdEndRenderPass(m_cmdBuffer);
@@ -2191,13 +2168,13 @@ void update()
 
 	double fac = (double)frame / 600.0f;
 
-	glm::mat4 Projection = glm::perspective(glm::radians(45.0f), 1.0f, 0.1f, 100.0f);
+	glm::mat4 Projection = glm::perspective(1.5708f, (float)width / (float)height, 0.5f, 1000.0f);
 	glm::mat4 View = glm::lookAt(
-		glm::vec3(10 * glm::sin(fac), 6 * glm::cos(fac / 2.5), 10 * glm::cos(fac)), // Camera is at (0,3,10), in World Space
+		glm::vec3(100 * sin(fac), 60 * cos(fac / 2.5), 100 * cos(fac)), // Camera is at (0,3,10), in World Space
 		glm::vec3(0, 0, 0),  // and looks at the origin
-		glm::vec3(0, -1, 0)  // Head is up (set to 0,-1,0 to look upside-down)
+		glm::vec3(0, 1, 0)  // Head is up (set to 0,-1,0 to look upside-down)
 	);
-	glm::mat4 Model = glm::mat4(1.0f);
+	glm::mat4 Model = glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
 	// Vulkan clip space has inverted Y and half Z.
 	glm::mat4 Clip = glm::mat4(1.0f, 0.0f, 0.0f, 0.0f,
 		0.0f, -1.0f, 0.0f, 0.0f,
@@ -2210,7 +2187,7 @@ void update()
 	VkResult res = vkMapMemory(m_device, m_uniform.mem, 0, m_uniform.mem_reqs.size, 0, (void **)&pData);
 	assert(res == VK_SUCCESS);
 
-	memcpy(pData, (const void*)&MVP, sizeof(MVP));
+	memcpy(pData, glm::value_ptr(MVP), sizeof(MVP));
 
 	vkUnmapMemory(m_device, m_uniform.mem);
 
@@ -2250,6 +2227,11 @@ Main
 
 int main(int argc, char *argv[])
 {
+	//Load shaders
+	vertShader = ToolBox::FileToBuf("instanced.vert");
+	fragShader = ToolBox::FileToBuf("simplePhong.frag");
+	computeShader = ToolBox::FileToBuf("test.compute");
+
 	InitWindow(width, height, "ColoredCube");
 
 	//Create Instance
@@ -2278,7 +2260,7 @@ int main(int argc, char *argv[])
 	//Create UniformBuffer
 	glm::mat4 Projection = glm::perspective(glm::radians(45.0f), 1.0f, 0.1f, 100.0f);
 	glm::mat4 View = glm::lookAt(
-		glm::vec3(2.5, 3, 10), // Camera is at (2.5,3,10), in World Space
+		glm::vec3(2.5, 3, 100), // Camera is at (2.5,3,10), in World Space
 		glm::vec3(2.5, 0, 0),  // and looks at the origin
 		glm::vec3(0, 1, 0)  // Head is up (set to 0,-1,0 to look upside-down)
 	);
@@ -2316,6 +2298,9 @@ int main(int argc, char *argv[])
 	m_vertexBuffer = CreateVertexBuffer(
 		m_device, m_memoryProperties, &g_vb_solid_face_colors_Data,
 		sizeof(g_vb_solid_face_colors_Data), sizeof(g_vb_solid_face_colors_Data[0]), sizeof(InstanceData), m_viBinding, m_viAttribs);
+	
+	m_instanceBuffer = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(InstanceData) * particlesCount, sizeof(InstanceData));
 
 	//Index buffer
 	/*m_indexBuffer = CreateIndexBuffer(

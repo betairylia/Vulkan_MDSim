@@ -1,0 +1,30 @@
+#version 450
+
+struct Particle
+{
+    vec4 pos;
+    vec4 prop;
+};
+
+layout(std140, binding = 0) buffer compBuffer
+{
+    Particle particles[ ];
+};
+
+layout (local_size_x = 512) in;
+
+//no uniforms now
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+
+    if(index >= 32768)
+    {
+        return;
+    }
+
+    particles[index].pos = 3.0f * vec4(index / 400, (index % 400) / 200, index % 200, 0.0f);
+    /*particles[index].pos = 0.0f.xxxx;*/
+    particles[index].prop = vec4(0, 0, 0, 0);
+}
