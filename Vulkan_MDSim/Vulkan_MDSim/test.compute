@@ -2,9 +2,16 @@
 
 struct Particle
 {
-    vec4 pos;
+    vec4 position;
+    vec4 velocity;
     vec4 prop;
 };
+
+/*
+Instance buffer
+Sorted index
+Cell information
+*/
 
 layout(std140, binding = 0) buffer compBuffer
 {
@@ -24,7 +31,8 @@ void main()
         return;
     }
 
-    particles[index].pos = 3.0f * vec4(index / 400, (index % 400) / 200, index % 200, 0.0f);
+    particles[index].position = 3.0f * vec4(index / 400, (index % 400) / 200, index % 200, 0.0f);
     /*particles[index].pos = 0.0f.xxxx;*/
+    particles[index].velocity = vec4(0, 0, 0, 0);
     particles[index].prop = vec4(0, 0, 0, 0);
 }

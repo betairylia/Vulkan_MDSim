@@ -96,8 +96,30 @@ typedef struct _db {
 
 typedef struct _id {
 	glm::vec4 position;
+	glm::vec4 velocity;
 	glm::vec4 prop;
 } InstanceData;
+
+typedef struct _c {
+	int start, end;
+} CellData;
+
+typedef struct _srtUni {
+	int arraySize, arraySizeBitscan;
+	int currentBit, bitLenth, bitLenthPow2;
+} SortUniforms;
+
+typedef struct _mdUni {
+	int particlesCount;
+	int cellSize;
+	glm::ivec4 cellCount;
+} MDUniforms;
+
+typedef struct _cellUni {
+	int particlesCount;
+	int cellSize;
+	glm::ivec4 cellCount;
+} CellUniforms;
 
 /*
 Globals
@@ -185,26 +207,30 @@ uint32_t m_currentBuffer;
 
 DepthMap m_depthMap;
 
-UniformBuffer m_uniform;
-
-VkPipelineLayout m_pipelineLayout, m_pipelineLayout_Compute;
-vector<VkDescriptorSetLayout> m_descLayout, m_descLayout_Compute;
+VkPipelineLayout m_pipelineLayout, m_pipelineLayout_Compute, m_pipelineLayout_Hash, m_pipelineLayout_GHP, m_pipelineLayout_PSum, m_pipelineLayout_ReOrder, m_pipelineLayout_Cell;
+vector<VkDescriptorSetLayout> m_descLayout, m_descLayout_Compute, m_descLayout_Hash, m_descLayout_GHP, m_descLayout_PSum, m_descLayout_ReOrder, m_descLayout_Cell;
 VkPipelineCache m_pipelineCache;
 VkRenderPass m_renderPass;
-VkPipeline m_pipeline, m_pipeline_Compute;
+VkPipeline m_pipeline, m_pipeline_Compute, m_pipeline_Hash, m_pipeline_GHP, m_pipeline_PSum, m_pipeline_ReOrder, m_pipeline_Cell;
 
-VkPipelineShaderStageCreateInfo m_shaderStages[2], m_shaderStages_Compute[1];
+VkPipelineShaderStageCreateInfo m_shaderStages[2], m_shaderStages_Compute, m_shaderStages_Hash, m_shaderStages_GHP, m_shaderStages_PSum, m_shaderStages_ReOrder, m_shaderStages_Cell;
 
 VkFramebuffer *m_framebuffers;
 
-DeviceBuffer m_instanceBuffer;
+UniformBuffer m_uniform, m_mdUniform, m_cellUniform;
+DeviceBuffer m_instanceBuffer, m_sortedIndicesBuffer, m_cellsBuffer;
+
+//Sort
+UniformBuffer m_srtUniform;
+DeviceBuffer m_sortedIndicesBufferInput, m_bitHistogram, m_bitScan, m_predicate, m_relativePos;
+
 VertexBuffer m_vertexBuffer;
 IndexBuffer m_indexBuffer;
 std::vector<VkVertexInputBindingDescription> m_viBinding;
 std::vector<VkVertexInputAttributeDescription> m_viAttribs;
 
 VkDescriptorPool m_descPool;
-vector<VkDescriptorSet> m_descSet, m_descSet_Compute;
+vector<VkDescriptorSet> m_descSet, m_descSet_Compute, m_descSet_Hash, m_descSet_GHP, m_descSet_PSum, m_descSet_ReOrder, m_descSet_Cell;
 
 VkViewport m_viewport;
 VkRect2D m_scissor;
@@ -219,6 +245,23 @@ HWND m_window;
 const int fenceTimeout = 100000000;
 const int width = 1280;
 const int height = 720;
+const int totalBits = 24;
+const int numBits = 2;
+
+int gridCount;
+int cellSize, cellCountTotal;
+glm::ivec3 cellCount;
+
+int pow(int a, int b)
+{
+	int result = 1;
+	for (int i = 0; i < b; i++)
+	{
+		result *= a;
+	}
+
+	return result;
+}
 
 /*
 Win32 window
@@ -1134,14 +1177,17 @@ UniformBuffer CreateUniformBuffer(
 		&(uniform_data.mem));
 	assert(res == VK_SUCCESS);
 
-	uint8_t *pData;
-	res = vkMapMemory(device, uniform_data.mem, 0, mem_reqs.size, 0,
-		(void **)&pData);
-	assert(res == VK_SUCCESS);
+	if (content != NULL)
+	{
+		uint8_t *pData;
+		res = vkMapMemory(device, uniform_data.mem, 0, mem_reqs.size, 0,
+			(void **)&pData);
+		assert(res == VK_SUCCESS);
 
-	memcpy(pData, content, size);
+		memcpy(pData, content, size);
 
-	vkUnmapMemory(device, uniform_data.mem);
+		vkUnmapMemory(device, uniform_data.mem);
+	}
 
 	res = vkBindBufferMemory(device, uniform_data.buf,
 		uniform_data.mem, 0);
@@ -1201,11 +1247,18 @@ void InitDescriptorPipelineLayout_Compute(
 	VkDevice device)
 {
 	VkDescriptorSetLayoutBinding layout_bindings[2];
+
 	layout_bindings[0].binding = 0;
-	layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	layout_bindings[0].descriptorCount = 1;
 	layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	layout_bindings[0].pImmutableSamplers = NULL;
+
+	layout_bindings[1].binding = 1;
+	layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	layout_bindings[1].descriptorCount = 3;
+	layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	layout_bindings[1].pImmutableSamplers = NULL;
 
 	/* Next take layout bindings and use them to create a descriptor set layout
 	*/
@@ -1213,12 +1266,12 @@ void InitDescriptorPipelineLayout_Compute(
 	descriptor_layout.sType =
 		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 	descriptor_layout.pNext = NULL;
-	descriptor_layout.bindingCount = 1;
+	descriptor_layout.bindingCount = 2;
 	descriptor_layout.pBindings = layout_bindings;
 
 	VkResult res;
 
-	desc_layout.resize(numDescSets_Compute);
+	desc_layout.resize(2);
 	res = vkCreateDescriptorSetLayout(device, &descriptor_layout, NULL,
 		desc_layout.data());
 	assert(res == VK_SUCCESS);
@@ -1230,11 +1283,130 @@ void InitDescriptorPipelineLayout_Compute(
 	pPipelineLayoutCreateInfo.pNext = NULL;
 	pPipelineLayoutCreateInfo.pushConstantRangeCount = 0;
 	pPipelineLayoutCreateInfo.pPushConstantRanges = NULL;
-	pPipelineLayoutCreateInfo.setLayoutCount = numDescSets_Compute;
+	pPipelineLayoutCreateInfo.setLayoutCount = 2;
 	pPipelineLayoutCreateInfo.pSetLayouts = desc_layout.data();
 
 	res = vkCreatePipelineLayout(device, &pPipelineLayoutCreateInfo, NULL,
 		&pipeline_layout);
+	assert(res == VK_SUCCESS);
+}
+
+void PrepareDescLayouts(VkDevice device)
+{
+	/////////////////////////
+	//   HASH
+	/////////////////////////
+
+	VkDescriptorSetLayoutBinding layout_bindings[2];
+
+	layout_bindings[0].binding = 0;
+	layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	layout_bindings[0].descriptorCount = 1;
+	layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	layout_bindings[0].pImmutableSamplers = NULL;
+
+	layout_bindings[1].binding = 1;
+	layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	layout_bindings[1].descriptorCount = 2;
+	layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	layout_bindings[1].pImmutableSamplers = NULL;
+
+	/* Next take layout bindings and use them to create a descriptor set layout
+	*/
+	VkDescriptorSetLayoutCreateInfo descriptor_layout = {};
+	descriptor_layout.sType =
+		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	descriptor_layout.pNext = NULL;
+	descriptor_layout.bindingCount = 2;
+	descriptor_layout.pBindings = layout_bindings;
+
+	VkResult res;
+
+	m_descLayout_Hash.resize(2);
+	res = vkCreateDescriptorSetLayout(device, &descriptor_layout, NULL,
+		m_descLayout_Hash.data());
+	assert(res == VK_SUCCESS);
+
+	/* Now use the descriptor layout to create a pipeline layout */
+	VkPipelineLayoutCreateInfo pPipelineLayoutCreateInfo = {};
+	pPipelineLayoutCreateInfo.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pPipelineLayoutCreateInfo.pNext = NULL;
+	pPipelineLayoutCreateInfo.pushConstantRangeCount = 0;
+	pPipelineLayoutCreateInfo.pPushConstantRanges = NULL;
+	pPipelineLayoutCreateInfo.setLayoutCount = 2;
+	pPipelineLayoutCreateInfo.pSetLayouts = m_descLayout_Hash.data();
+
+	res = vkCreatePipelineLayout(device, &pPipelineLayoutCreateInfo, NULL,
+		&m_pipelineLayout_Hash);
+	assert(res == VK_SUCCESS);
+
+	/////////////////////////
+	//   Histogram And Predicate
+	/////////////////////////
+
+	layout_bindings[1].descriptorCount = 3;
+
+	m_descLayout_GHP.resize(2);
+	res = vkCreateDescriptorSetLayout(device, &descriptor_layout, NULL,
+		m_descLayout_GHP.data());
+	assert(res == VK_SUCCESS);
+
+	pPipelineLayoutCreateInfo.pSetLayouts = m_descLayout_GHP.data();
+
+	res = vkCreatePipelineLayout(device, &pPipelineLayoutCreateInfo, NULL,
+		&m_pipelineLayout_GHP);
+	assert(res == VK_SUCCESS);
+
+	/////////////////////////
+	//   PrefixSum
+	/////////////////////////
+
+	layout_bindings[1].descriptorCount = 2;
+
+	m_descLayout_PSum.resize(2);
+	res = vkCreateDescriptorSetLayout(device, &descriptor_layout, NULL,
+		m_descLayout_PSum.data());
+	assert(res == VK_SUCCESS);
+
+	pPipelineLayoutCreateInfo.pSetLayouts = m_descLayout_PSum.data();
+
+	res = vkCreatePipelineLayout(device, &pPipelineLayoutCreateInfo, NULL,
+		&m_pipelineLayout_PSum);
+	assert(res == VK_SUCCESS);
+
+	/////////////////////////
+	//   ReOrder
+	/////////////////////////
+
+	layout_bindings[1].descriptorCount = 4;
+
+	m_descLayout_ReOrder.resize(2);
+	res = vkCreateDescriptorSetLayout(device, &descriptor_layout, NULL,
+		m_descLayout_ReOrder.data());
+	assert(res == VK_SUCCESS);
+
+	pPipelineLayoutCreateInfo.pSetLayouts = m_descLayout_ReOrder.data();
+
+	res = vkCreatePipelineLayout(device, &pPipelineLayoutCreateInfo, NULL,
+		&m_pipelineLayout_ReOrder);
+	assert(res == VK_SUCCESS);
+
+	/////////////////////////
+	//   ComputeCell
+	/////////////////////////
+
+	layout_bindings[1].descriptorCount = 2;
+
+	m_descLayout_Cell.resize(2);
+	res = vkCreateDescriptorSetLayout(device, &descriptor_layout, NULL,
+		m_descLayout_Cell.data());
+	assert(res == VK_SUCCESS);
+
+	pPipelineLayoutCreateInfo.pSetLayouts = m_descLayout_Cell.data();
+
+	res = vkCreatePipelineLayout(device, &pPipelineLayoutCreateInfo, NULL,
+		&m_pipelineLayout_Cell);
 	assert(res == VK_SUCCESS);
 }
 
@@ -1741,10 +1913,10 @@ void CreateDescriptorSet_Compute(
 	alloc_info[0].sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 	alloc_info[0].pNext = NULL;
 	alloc_info[0].descriptorPool = desc_pool;
-	alloc_info[0].descriptorSetCount = numDescSets_Compute;
+	alloc_info[0].descriptorSetCount = 2;
 	alloc_info[0].pSetLayouts = desc_layout.data();
 
-	desc_set.resize(numDescSets_Compute);
+	desc_set.resize(2);
 	res =
 		vkAllocateDescriptorSets(device, alloc_info, desc_set.data());
 	assert(res == VK_SUCCESS);
@@ -1752,21 +1924,35 @@ void CreateDescriptorSet_Compute(
 	//Maybe the following was wrong...?
 
 	VkWriteDescriptorSet writes[10];
+	VkDescriptorBufferInfo info[3] = 
+	{ m_instanceBuffer.buffer_info, m_sortedIndicesBuffer.buffer_info, m_cellsBuffer.buffer_info };
 
-	for (int i = 0; i < buffersCount; i++)
-	{
-		writes[i] = {};
-		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[i].pNext = NULL;
-		writes[i].dstSet = desc_set[0];
-		writes[i].descriptorCount = 1;
-		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		writes[i].pBufferInfo = &buffers[i].buffer_info;
-		writes[i].dstArrayElement = 0;
-		writes[i].dstBinding = i;
-	}
+	writes[0] = {};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].pNext = NULL;
+	writes[0].dstSet = desc_set[1];
+	writes[0].descriptorCount = 3;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[0].pBufferInfo = info;
+	writes[0].dstArrayElement = 0;
+	writes[0].dstBinding = 1;
 
-	vkUpdateDescriptorSets(device, buffersCount, writes, 0, NULL);
+	writes[1] = {};
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].pNext = NULL;
+	writes[1].dstSet = desc_set[0];
+	writes[1].descriptorCount = 1;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	writes[1].pBufferInfo = &m_mdUniform.buffer_info;
+	writes[1].dstArrayElement = 0;
+	writes[1].dstBinding = 0;
+
+	vkUpdateDescriptorSets(device, 2, writes, 0, NULL);
+}
+
+void PrepareDescriptorSets(VkDevice device, VkDescriptorPool &desc_pool)
+{
+
 }
 
 void CreatePipeline(
@@ -2230,7 +2416,6 @@ int main(int argc, char *argv[])
 	//Load shaders
 	vertShader = ToolBox::FileToBuf("instanced.vert");
 	fragShader = ToolBox::FileToBuf("simplePhong.frag");
-	computeShader = ToolBox::FileToBuf("test.compute");
 
 	InitWindow(width, height, "ColoredCube");
 
@@ -2274,17 +2459,38 @@ int main(int argc, char *argv[])
 	glm::mat4 MVP = Clip * Projection * View * Model;
 
 	m_uniform = CreateUniformBuffer(&MVP, sizeof(MVP), m_device, m_memoryProperties);
+	m_srtUniform = CreateUniformBuffer(NULL, sizeof(SortUniforms), m_device, m_memoryProperties);
+	m_cellUniform = CreateUniformBuffer(NULL, sizeof(CellUniforms), m_device, m_memoryProperties);
+	m_mdUniform = CreateUniformBuffer(NULL, sizeof(MDUniforms), m_device, m_memoryProperties);
 
 	//Descriptor & pipeline Layout
 	InitDescriptorPipelineLayout(m_descLayout, m_pipelineLayout, m_device);
 	InitDescriptorPipelineLayout_Compute(m_descLayout_Compute, m_pipelineLayout_Compute, m_device);
+	PrepareDescLayouts(m_device);
 
 	//RenderPass
 	m_renderPass = CreateRenderPass(m_colorImgFormat, m_depthMap, m_device);
 
 	//Shader. glsl to SPIR-V by glslang.
 	InitShaderStageCreateInfo(vertShader, fragShader, m_shaderStages[0], m_shaderStages[1], m_device);
-	InitShaderStageCreateInfo_Compute(computeShader, m_shaderStages_Compute[0], m_device);
+	
+	computeShader = ToolBox::FileToBuf("test.compute");
+	InitShaderStageCreateInfo_Compute(computeShader, m_shaderStages_Compute, m_device);
+
+	computeShader = ToolBox::FileToBuf("hash.compute");
+	InitShaderStageCreateInfo_Compute(computeShader, m_shaderStages_Hash, m_device);
+
+	computeShader = ToolBox::FileToBuf("generateHistogramAndPredicate.compute");
+	InitShaderStageCreateInfo_Compute(computeShader, m_shaderStages_GHP, m_device);
+
+	computeShader = ToolBox::FileToBuf("prefixSum.compute");
+	InitShaderStageCreateInfo_Compute(computeShader, m_shaderStages_PSum, m_device);
+
+	computeShader = ToolBox::FileToBuf("reOrder.compute");
+	InitShaderStageCreateInfo_Compute(computeShader, m_shaderStages_ReOrder, m_device);
+
+	computeShader = ToolBox::FileToBuf("computeCell.compute");
+	InitShaderStageCreateInfo_Compute(computeShader, m_shaderStages_Cell, m_device);
 
 	//Create frame buffers
 	m_framebuffers = CreateFrameBuffers(m_device, m_depthMap, m_swapChainImgBuffer.data(), m_renderPass, width, height, m_swapChainImageCount);
@@ -2302,6 +2508,27 @@ int main(int argc, char *argv[])
 	m_instanceBuffer = CreateDeviceBuffer(
 		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(InstanceData) * particlesCount, sizeof(InstanceData));
 
+	m_cellsBuffer = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(CellData) * cellCountTotal, sizeof(CellData));
+
+	m_bitHistogram = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(int) * pow(2, numBits), sizeof(int));
+
+	m_bitScan = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(int) * pow(2, numBits), sizeof(int));
+
+	m_predicate = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(int) * pow(2, numBits) * particlesCount, sizeof(int));
+
+	m_relativePos = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(int) * pow(2, numBits) * particlesCount, sizeof(int));
+
+	m_sortedIndicesBuffer = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(int) * particlesCount, sizeof(int));
+
+	m_sortedIndicesBufferInput = CreateDeviceBuffer(
+		m_device, m_memoryProperties, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, sizeof(int) * particlesCount, sizeof(int));
+
 	//Index buffer
 	/*m_indexBuffer = CreateIndexBuffer(
 	m_device, m_memoryProperties, &indexData,
@@ -2314,7 +2541,7 @@ int main(int argc, char *argv[])
 
 	//Pipeline
 	CreatePipeline(m_device, m_pipelineCache, m_pipeline, m_viBinding, m_viAttribs, m_pipelineLayout, m_shaderStages, m_renderPass);
-	CreatePipeline_Compute(m_device, m_pipeline_Compute, m_pipelineLayout_Compute, m_shaderStages_Compute[0], m_renderPass);
+	CreatePipeline_Compute(m_device, m_pipeline_Compute, m_pipelineLayout_Compute, m_shaderStages_Compute, m_renderPass);
 
 	initViewports(width, height, m_cmdBuffer, m_viewport);
 	initScissors(width, height, m_cmdBuffer, m_scissor);
